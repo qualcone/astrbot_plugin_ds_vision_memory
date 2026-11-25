@@ -65,10 +65,10 @@ CAPTION_HEADER = (
 )
 
 DEFAULT_VISION_PROMPT = "\n".join([
-    "你是图片与二次元角色识别专家，请识别图中的主要对象（动漫/游戏角色、真人、表情包、物品或场景等），并主动使用联网/搜图工具核实。",
-    "1. 提取特征：仔细观察发型发色（刘海、发饰）、瞳色眼型、服装配饰、画风、画面文字或 Logo。区分强特征（独特组合）与弱特征（常见发色瞳色）。",
-    "2. 联网核实：针对候选对象用“作品名 + 角色名 + 关键特征”联网搜索（优先萌娘百科、维基、官方资料），将查到的外貌设定与图中特征逐项对照。",
-    "3. 下结论：至少 2～3 个强特征吻合再加 1 个设定线索才给高置信度；有明显不吻合时降低置信度或更换候选；查不到或对不上就如实写“无法确认”，不要编造。",
+    "你是图片与二次元角色识别专家。禁止凭记忆直接猜测！面对每张图片，你都必须先调用联网搜索/搜图工具（以图搜图，再按候选角色名搜索萌娘百科、维基或官方资料）核实后再作答。",
+    "1. 先搜图与提特征：先调用工具对图片进行搜索，同时提取强特征（发型发色、刘海发饰、瞳色眼型、服装配饰、画风、画面文字或 Logo）。",
+    "2. 联网核实设定：对候选对象用“作品名 + 角色名 + 关键特征”搜索，把查到的外貌设定与图中特征逐项对照。",
+    "3. 下结论：至少 2～3 个强特征吻合再加 1 个设定线索才给高置信度；有明显不吻合时降低置信度或更换候选；搜不到或对不上就如实写“无法确认”，不要编造。",
     "只写图中看到的和搜索查到的内容，不要凭记忆补充设定。每项写成一行，不要换行，严格输出以下四行：",
     "对象：名字（类型：动漫角色/游戏角色/真人/表情包/其他，可信度 高/中/低）；认出了出处但认不准是谁写“未确定”；完全无法确认写“无法确认”",
     "出处：作品名或身份；不知道写“未知”",
@@ -233,20 +233,65 @@ def _temp_part(text: str):
 
 
 def _extract_citations(message: dict, limit: int = 2) -> list:
-    """Extract unique citation URLs from DeepSeek `message.annotations`."""
+    """Extract unique citation URLs from DeepSeek `message.annotations` (with fallback to `server_tool_calls`)."""
     urls = []
     seen = set()
+
+    def _add(url):
+        u = (url or "").strip()
+        if u.startswith(("http://", "https://")) and u not in seen:
+            seen.add(u)
+            urls.append(u)
+
     for ann in message.get("annotations") or []:
         if not isinstance(ann, dict):
             continue
         cite = ann.get("url_citation") if isinstance(ann.get("url_citation"), dict) else ann
-        url = (cite.get("url") or "").strip()
-        if url.startswith(("http://", "https://")) and url not in seen:
-            seen.add(url)
-            urls.append(url)
+        _add(cite.get("url"))
+        if len(urls) >= limit:
+            return urls
+
+    for step in message.get("server_tool_calls") or []:
+        if not isinstance(step, dict):
+            continue
+        for res in step.get("results") or []:
+            if not isinstance(res, dict):
+                continue
+            page = res.get("page")
+            if isinstance(page, dict):
+                _add(page.get("url"))
+            for item in res.get("results") or []:
+                if isinstance(item, dict):
+                    _add(item.get("url"))
+                if len(urls) >= limit:
+                    return urls
             if len(urls) >= limit:
-                break
+                return urls
     return urls
+
+
+def _extract_server_tool_calls(message: dict) -> list:
+    """Summarize DeepSeek `message.server_tool_calls` for diagnostics."""
+    summary = []
+    for step in message.get("server_tool_calls") or []:
+        if not isinstance(step, dict):
+            continue
+        for call in step.get("calls") or []:
+            if not isinstance(call, dict):
+                continue
+            kind = str(call.get("kind") or call.get("type") or "unknown").strip()
+            inp = call.get("input") if isinstance(call.get("input"), dict) else {}
+            queries = inp.get("queries")
+            if isinstance(queries, list) and queries:
+                q_str = " / ".join(str(q) for q in queries[:3] if q)
+                summary.append(f"{kind}({q_str})")
+            elif inp.get("query"):
+                summary.append(f"{kind}({inp['query']})")
+            elif inp.get("url"):
+                summary.append(f"{kind}({_clip(inp['url'], 60)})")
+            else:
+                summary.append(kind)
+    return summary
 
 
 def _deepseek_vision_request(
@@ -325,6 +370,7 @@ def _deepseek_vision_request(
     return {
         "text": text,
         "urls": _extract_citations(msg, limit=2),
+        "tool_calls": _extract_server_tool_calls(msg),
         "usage": data.get("usage") if isinstance(data.get("usage"), dict) else {},
     }
 
@@ -368,7 +414,7 @@ class DSVisionMemory(Star):
         return (self._cfg("deepseek", "base_url", DS_DEFAULT_BASE) or DS_DEFAULT_BASE).strip()
 
     def _ds_thinking(self) -> bool:
-        return bool(self._cfg("deepseek", "enable_thinking", False))
+        return bool(self._cfg("deepseek", "enable_thinking", True))
 
     def _ds_timeout(self) -> int:
         t = _as_int(self._cfg("deepseek", "timeout", DS_DEFAULT_TIMEOUT), DS_DEFAULT_TIMEOUT, 15, 600)
@@ -525,7 +571,7 @@ class DSVisionMemory(Star):
         timeout = self._ds_timeout()
         ask = (
             (f"用户消息：{_clip(user_text, 300)}\n\n" if user_text.strip() else "")
-            + "请识别这张图片中的主要对象，并通过联网/搜图核实其名字、出处和外貌设定。"
+            + "请务必先使用联网搜图/网页搜索工具核实这张图片中的主要对象是谁、出自哪部作品以及外貌设定，不要凭记忆直接猜测。"
         )
         try:
             res = await asyncio.wait_for(
@@ -583,9 +629,10 @@ class DSVisionMemory(Star):
 
         raw_text = res.get("text") or ""
         urls = res.get("urls") or []
+        tool_calls = res.get("tool_calls") or []
         usage = res.get("usage") or {}
         self._dbg(
-            f"DeepSeek 耗时 {elapsed:.1f}s，tokens={usage}，引用={urls}\n原始输出：{_clip(raw_text, 800)}"
+            f"DeepSeek 耗时 {elapsed:.1f}s，搜索调用={tool_calls or '未触发'}，tokens={usage}，引用={urls}\n原始输出：{_clip(raw_text, 800)}"
         )
         if not raw_text:
             return "（识图模型未返回内容，请直接看图回答）", False, ""
@@ -747,9 +794,13 @@ class DSVisionMemory(Star):
 
         text = res.get("text") or ""
         cites = res.get("urls") or []
+        tool_calls = res.get("tool_calls") or []
         usage = res.get("usage") or {}
         parsed = _parse_structured(text)
         lines = [head]
+        lines.append(
+            "联网搜索：" + ("、".join(tool_calls[:6]) if tool_calls else "未触发（模型直接回答）")
+        )
         if usage:
             lines.append(
                 f"Token：输入 {usage.get('prompt_tokens', '?')} / 输出 {usage.get('completion_tokens', '?')}"
