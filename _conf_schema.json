@@ -1,0 +1,155 @@
+{
+  "deepseek": {
+    "description": "① DeepSeek 识图与联网搜索",
+    "type": "object",
+    "hint": "直接调用 DeepSeek 原生多模态模型（deepseek-flash）+ 内置服务端联网/搜图工具（deepseek_web_search）。自 2026-11-18 起，模型触发的服务端搜索与网页抓取不再单独计费，仅按 token 计费。",
+    "items": {
+      "api_key": {
+        "description": "DeepSeek API Key",
+        "type": "string",
+        "default": "",
+        "secret": true,
+        "hint": "在 platform.deepseek.com 创建的 API Key。留空时插件不处理图片，图片原样传给主模型。"
+      },
+      "model": {
+        "description": "模型名称",
+        "type": "string",
+        "default": "deepseek-flash",
+        "hint": "默认 deepseek-flash（原生支持图片输入与 deepseek_web_search）。不要使用仅文本模型（如 deepseek-v4-pro）或已弃用名称。"
+      },
+      "base_url": {
+        "description": "接口地址",
+        "type": "string",
+        "default": "https://api.deepseek.com",
+        "hint": "官方地址一般无需修改，不要带 /chat/completions。API Key 会发往此地址，请仅填写可信地址。"
+      },
+      "enable_thinking": {
+        "description": "开启深度思考搜索（Deep Thinking Search）",
+        "type": "bool",
+        "default": false,
+        "hint": "关闭（默认）：普通联网/搜图模式，速度快（通常数秒至十几秒）。开启：深度思考搜索，模型会多轮搜索并打开网页交叉核实，准确率更高但耗时较长（通常 30～120 秒）。"
+      },
+      "timeout": {
+        "description": "单图超时（秒）",
+        "type": "int",
+        "default": 90,
+        "hint": "等待 DeepSeek 返回的最大秒数（15–600）。开启深度思考搜索时自动不低于 150 秒。"
+      },
+      "prompt": {
+        "description": "识图提示词（可选）",
+        "type": "text",
+        "default": "",
+        "hint": "留空使用内置默认提示词。自定义时建议保留末尾四行输出格式（对象 / 出处 / 设定 / 依据），插件按这些字段解析结果。"
+      }
+    }
+  },
+  "filter": {
+    "description": "② 表情包过滤与缓存",
+    "type": "object",
+    "hint": "控制哪些图片需要识别，以及识别结果的本地缓存时长，避免重复调用。",
+    "items": {
+      "sticker_mode": {
+        "description": "表情包处理方式",
+        "type": "string",
+        "options": [
+          "ask_only",
+          "always"
+        ],
+        "labels": [
+          "问了才识别（默认）",
+          "总是识别"
+        ],
+        "default": "ask_only",
+        "hint": "问了才识别：平台标记为表情，或体积 < 60KB / 最长边 ≤ 512px 的小图，仅在消息包含提问关键词时识别；GIF 动图始终跳过。总是识别：除 GIF 外每张图都识别。"
+      },
+      "ask_keywords": {
+        "description": "算作“提问”的关键词",
+        "type": "list",
+        "items": {
+          "type": "string"
+        },
+        "default": [
+          "谁",
+          "什么",
+          "哪个",
+          "哪部",
+          "哪里",
+          "哪儿",
+          "叫啥",
+          "出自",
+          "认识",
+          "认得",
+          "角色",
+          "识别",
+          "是不是",
+          "是哪",
+          "是啥",
+          "知道吗",
+          "来源",
+          "名字",
+          "作品",
+          "出处",
+          "什么梗",
+          "吗",
+          "？",
+          "?"
+        ],
+        "hint": "仅在“问了才识别”模式下生效。消息包含其中任意一词即视为提问；清空则任何非空文字都算提问。"
+      },
+      "cache_days": {
+        "description": "缓存天数",
+        "type": "int",
+        "default": 7,
+        "hint": "已识别出的结果缓存天数（0 表示关闭缓存，最大 90）。同一张图或重新压缩后的近似图（感知哈希差异 ≤ 4 位）直接复用结果，修改模型或思考开关会自动失效。"
+      }
+    }
+  },
+  "memory": {
+    "description": "③ 长期记忆与主模型指引（可选）",
+    "type": "object",
+    "hint": "可选对接 LivingMemory 外部 API，将核实后的角色写入长期记忆。不填 Key 时仅做识图，不影响正常使用。",
+    "items": {
+      "lm_api_url": {
+        "description": "LivingMemory 外部 API 地址",
+        "type": "string",
+        "default": "http://127.0.0.1:7801",
+        "hint": "需在 LivingMemory 中开启 external_api.enabled（默认本机 7801 端口）。"
+      },
+      "lm_api_key": {
+        "description": "LivingMemory 外部 API Key",
+        "type": "string",
+        "default": "",
+        "secret": true,
+        "hint": "以 lm_ 开头，建议同时具备 read 与 write 权限（在 LivingMemory 中使用 /lmem apikey 创建）。留空则不启用写入。"
+      },
+      "memory_scope": {
+        "description": "写入的记忆范围",
+        "type": "string",
+        "default": "session",
+        "options": [
+          "session",
+          "global"
+        ],
+        "hint": "session：写入当前会话范围；global：写入全局范围（LivingMemory 为 global 模式时选用）。"
+      },
+      "guidance_text": {
+        "description": "给主模型的行为指引",
+        "type": "text",
+        "default": "",
+        "hint": "识别图片后追加到主模型系统提示词末尾。留空使用内置默认指引；填 \"off\" 可关闭追加。"
+      }
+    }
+  },
+  "debug": {
+    "description": "④ 调试",
+    "type": "object",
+    "items": {
+      "enable": {
+        "description": "调试模式",
+        "type": "bool",
+        "default": false,
+        "hint": "开启后在 AstrBot 日志中搜索 [ds_vision_memory][debug] 查看完整耗时、模型输出、引用链接与记忆写入细节（不含 API Key）。"
+      }
+    }
+  }
+}
